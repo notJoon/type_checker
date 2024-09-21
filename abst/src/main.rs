@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use ast::ASTNode;
 use interpret::{interpret, merge_values};
@@ -7,7 +7,7 @@ mod ast;
 mod interpret;
 
 /// abstract value
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum AbstractValue {
     Undefined,
     Null,
@@ -15,12 +15,13 @@ enum AbstractValue {
     Number,
     String,
     Object(AbstractObject),
+    Array(Vec<AbstractValue>),
     Union(Vec<AbstractValue>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct AbstractObject {
-    props: HashMap<String, AbstractValue>,
+    props: BTreeMap<String, AbstractValue>,
 }
 
 #[derive(Clone)]
@@ -69,6 +70,9 @@ impl AbstractState {
 
 fn main() {
     let mut state = AbstractState::new();
+
+    // writing a parser to generate AST is unnecessary,
+    
 
     // function add(a, b) { return a + b; }
     let function_add = ASTNode::FunctionDeclaration {
@@ -139,6 +143,25 @@ fn main() {
         }),
     };
 
+    // arr = [1, "two", true];
+    let assign_arr = ASTNode::Assignment {
+        target: "arr".to_string(),
+        value: Box::new(ASTNode::ArrayLiteral(vec![
+            ASTNode::Literal(AbstractValue::Number),
+            ASTNode::Literal(AbstractValue::String),
+            ASTNode::Literal(AbstractValue::Boolean),
+        ])),
+    };
+
+    // elem = arr[0];
+    let assign_elem = ASTNode::Assignment {
+        target: "elem".to_string(),
+        value: Box::new(ASTNode::ArrayIndex {
+            array: Box::new(ASTNode::Variable("arr".to_string())),
+            index: Box::new(ASTNode::Literal(AbstractValue::Number)), // 인덱스는 숫자로 처리
+        }),
+    };
+
     let program = ASTNode::Block {
         statements: vec![
             function_add,
@@ -147,6 +170,8 @@ fn main() {
             assign_z,
             if_statement,
             while_loop,
+            assign_arr,
+            assign_elem,
         ],
     };
 

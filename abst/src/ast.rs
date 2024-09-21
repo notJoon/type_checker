@@ -34,4 +34,9 @@ pub enum ASTNode {
         function: Box<ASTNode>,
         arguments: Vec<ASTNode>,
     },
+    ArrayLiteral(Vec<ASTNode>),
+    ArrayIndex {
+        array: Box<ASTNode>,
+        index: Box<ASTNode>,
+    },
 }

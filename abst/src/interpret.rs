@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::{ast::ASTNode, AbstractState, AbstractValue, Function};
 
 // Abstract interpretation
@@ -89,6 +91,50 @@ pub fn interpret(node: &ASTNode, state: &mut AbstractState) -> AbstractValue {
                 AbstractValue::Undefined
             }
         }
+        ASTNode::ArrayLiteral(elements) => {
+            let mut avv = Vec::new();
+            for elem in elements {
+                let value = interpret(elem, state);
+                avv.push(value);
+            }
+            AbstractValue::Array(avv)
+        },
+        ASTNode::ArrayIndex { array, index } => {
+            let array_value = interpret(array, state);
+            let index_value = interpret(index, state);
+
+            if !matches!(index_value, AbstractValue::Number) {
+                return AbstractValue::Undefined;
+            }
+
+            let element_type = match array_value {
+                AbstractValue::Array(elements) => {
+                    // merge all element types in the array
+                    let mut element_type = AbstractValue::Undefined;
+                    for element in elements {
+                        element_type = merge_values(&element_type, &element);
+                    }
+                    element_type
+                }
+                AbstractValue::Union(variants) => {
+                    let mut element_type = AbstractValue::Undefined;
+                    for variant in variants {
+                        if let AbstractValue::Array(elements) = variant {
+                            for element in elements {
+                                element_type = merge_values(&element_type, &element);
+                            }
+                        } else {
+                            // infer as undefined if not an array
+                            element_type =
+                                merge_values(&element_type, &AbstractValue::Undefined);
+                        }
+                    }
+                    element_type
+                }
+                _ => AbstractValue::Undefined,
+            };
+            element_type
+        }
     }
 }
 
@@ -130,33 +176,66 @@ fn abstract_equal(_left: &AbstractValue, _right: &AbstractValue) -> AbstractValu
 
 pub fn merge_values(a: &AbstractValue, b: &AbstractValue) -> AbstractValue {
     if a == b {
-        a.clone()
-    } else {
-        match (a, b) {
-            (AbstractValue::Union(av), AbstractValue::Union(bv)) => {
-                let mut union = av.clone();
-                for v in bv {
-                    if !union.contains(v) {
-                        union.push(v.clone());
-                    }
-                }
-                AbstractValue::Union(union)
+        return a.clone();
+    }
+    if matches!(a, AbstractValue::Undefined) {
+        return b.clone();
+    }
+    if matches!(b, AbstractValue::Undefined) {
+        return a.clone();
+    }
+
+    match (a, b) {
+        // if both two values are Array, merge their each element
+        (AbstractValue::Array(a_elements), AbstractValue::Array(b_elements)) => {
+            let mut merged_elements = Vec::new();
+            let max_length = usize::max(a_elements.len(), b_elements.len());
+            for i in 0..max_length {
+                // take i-th element from each array, if not exist, take Undefined
+                let a_elem = a_elements.get(i).unwrap_or(&AbstractValue::Undefined);
+                let b_elem = b_elements.get(i).unwrap_or(&AbstractValue::Undefined);
+                let merged_elem = merge_values(a_elem, b_elem);
+                merged_elements.push(merged_elem);
             }
-            (AbstractValue::Union(av), _) => {
-                let mut union = av.clone();
-                if !union.contains(b) {
-                    union.push(b.clone());
-                }
-                AbstractValue::Union(union)
-            }
-            (_, AbstractValue::Union(bv)) => {
-                let mut union = bv.clone();
-                if !union.contains(a) {
-                    union.push(a.clone());
-                }
-                AbstractValue::Union(union)
-            }
-            _ => AbstractValue::Union(vec![a.clone(), b.clone()]),
+            AbstractValue::Array(merged_elements)
         }
+        // if one of them is Array, merge their each element
+        (AbstractValue::Array(_), _) | (_, AbstractValue::Array(_)) => {
+            merge_variants(vec![a.clone(), b.clone()])
+        }
+        // if both are same type, return the type
+        _ => {
+            merge_variants(vec![a.clone(), b.clone()])
+        }
+    }
+}
+
+// merge all variants into one
+fn merge_variants(values: Vec<AbstractValue>) -> AbstractValue {
+    let mut variants = HashSet::new();
+
+    // recursively collect all variants to flaten the union
+    fn collect_variants(value: AbstractValue, set: &mut HashSet<AbstractValue>) {
+        match value {
+            // we collect inner variants when we meet union
+            AbstractValue::Union(values) => {
+                for v in values {
+                    collect_variants(v, set);
+                }
+            }
+            _ => {
+                set.insert(value);
+            }
+        }
+    }
+
+    for value in values {
+        collect_variants(value, &mut variants);
+    }
+
+    if variants.len() == 1 {
+        variants.into_iter().next().unwrap()
+    } else {
+        AbstractValue::Union(variants.into_iter().collect())
     }
 }
