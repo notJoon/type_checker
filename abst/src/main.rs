@@ -1,78 +1,14 @@
-use std::collections::{BTreeMap, HashMap};
-
 use ast::ASTNode;
-use interpret::{interpret, merge_values};
+use interpret::interpret;
+use types::{AbstractState, AbstractValue};
 
 mod ast;
 mod interpret;
-
-/// abstract value
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum AbstractValue {
-    Undefined,
-    Null,
-    Boolean,
-    Number,
-    String,
-    Object(AbstractObject),
-    Array(Vec<AbstractValue>),
-    Union(Vec<AbstractValue>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct AbstractObject {
-    props: BTreeMap<String, AbstractValue>,
-}
-
-#[derive(Clone)]
-struct Function {
-    params: Vec<String>,
-    body: ASTNode,
-}
-
-#[derive(Clone)]
-struct AbstractState {
-    variables: HashMap<String, AbstractValue>,
-    functions: HashMap<String, Function>,
-}
-
-impl AbstractState {
-    fn new() -> Self {
-        AbstractState {
-            variables: HashMap::new(),
-            functions: HashMap::new(),
-        }
-    }
-
-    fn assign(&mut self, name: &str, value: AbstractValue) {
-        self.variables.insert(name.to_string(), value);
-    }
-
-    fn get(&self, name: &str) -> Option<&AbstractValue> {
-        self.variables.get(name)
-    }
-
-    // e.g. for control flow
-    fn merge(&mut self, other: &AbstractState) {
-        for (key, value) in &other.variables {
-            if let Some(existing_value) = self.variables.get(key) {
-                let merged_value = merge_values(existing_value, value);
-                self.variables.insert(key.clone(), merged_value);
-            } else {
-                self.variables.insert(key.clone(), value.clone());
-            }
-        }
-        for (key, function) in &other.functions {
-            self.functions.insert(key.clone(), function.clone());
-        }
-    }
-}
-
+mod types;
 fn main() {
     let mut state = AbstractState::new();
 
     // writing a parser to generate AST is unnecessary,
-    
 
     // function add(a, b) { return a + b; }
     let function_add = ASTNode::FunctionDeclaration {

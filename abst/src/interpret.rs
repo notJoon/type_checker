@@ -1,6 +1,38 @@
-use std::collections::HashSet;
+use crate::{ast::ASTNode, types::Function, AbstractState, AbstractValue};
 
-use crate::{ast::ASTNode, AbstractState, AbstractValue, Function};
+// This module performs abstract interpretation of an AST (Abstract Syntax Tree).
+//
+// The core functionality revolves around interpreting nodes using abstract values,
+// which represent sets of possible runtime values.
+//
+// A key aspect of this interpretation is the merging of abstract values,
+// especially when dealing with control flow constructs like if-statements and loops.
+// The `merge` operation combines two abstract values into one, representing the union
+// of their possible values.
+//
+// The `merge` operation is designed using algebraic properties to ensure consistency
+// and correctness:
+//
+// - **Associativity**: `(a.merge(b)).merge(c) == a.merge(b.merge(c))`
+//   - The grouping of merge operations does not affect the final result.
+// - **Commutativity**: `a.merge(b) == b.merge(a)`
+//   - The order of operands does not affect the merge result.
+// - **Idempotence**: `a.merge(a) == a`
+//   - Merging a value with itself yields the same value.
+// - **Identity Element**: `Undefined` acts as the identity element.
+//   - `a.merge(Undefined) == a` and `Undefined.merge(a) == a`
+//
+// By leveraging these algebraic properties, we ensure that the merging process
+// is both predictable and (*ideally*) mathematically sound, which is crucial for accurate
+// abstract interpretation.
+//
+// The `Merge` trait defines the `merge` method, and it is implemented for
+// `AbstractValue`, allowing us to perform merges seamlessly across different
+// abstract value types.
+
+pub trait Merge {
+    fn merge(&self, other: &Self) -> Self;
+}
 
 // Abstract interpretation
 pub fn interpret(node: &ASTNode, state: &mut AbstractState) -> AbstractValue {
@@ -43,7 +75,7 @@ pub fn interpret(node: &ASTNode, state: &mut AbstractState) -> AbstractValue {
             // merge states
             state.merge(&then_state);
             state.merge(&else_state);
-            merge_values(&then_value, &else_value)
+            then_value.merge(&else_value)
         }
         ASTNode::WhileLoop { condition: _, body } => {
             // assume loop runs 0 or more times
@@ -74,7 +106,6 @@ pub fn interpret(node: &ASTNode, state: &mut AbstractState) -> AbstractValue {
             // we assume function is a variable name for simplicity
             if let ASTNode::Variable(func_name) = &**function {
                 if let Some(func) = state.functions.get(func_name).cloned() {
-                    // immutable borrow ends here
                     // create new state
                     let mut func_state = AbstractState::new();
                     // assign arguments to parameters
@@ -92,13 +123,9 @@ pub fn interpret(node: &ASTNode, state: &mut AbstractState) -> AbstractValue {
             }
         }
         ASTNode::ArrayLiteral(elements) => {
-            let mut avv = Vec::new();
-            for elem in elements {
-                let value = interpret(elem, state);
-                avv.push(value);
-            }
+            let avv = elements.iter().map(|elem| interpret(elem, state)).collect();
             AbstractValue::Array(avv)
-        },
+        }
         ASTNode::ArrayIndex { array, index } => {
             let array_value = interpret(array, state);
             let index_value = interpret(index, state);
@@ -109,27 +136,24 @@ pub fn interpret(node: &ASTNode, state: &mut AbstractState) -> AbstractValue {
 
             let element_type = match array_value {
                 AbstractValue::Array(elements) => {
-                    // merge all element types in the array
-                    let mut element_type = AbstractValue::Undefined;
-                    for element in elements {
-                        element_type = merge_values(&element_type, &element);
-                    }
-                    element_type
+                    // merge all elements
+                    elements
+                        .iter()
+                        .fold(AbstractValue::Undefined, |acc, elem| acc.merge(elem))
                 }
                 AbstractValue::Union(variants) => {
-                    let mut element_type = AbstractValue::Undefined;
-                    for variant in variants {
-                        if let AbstractValue::Array(elements) = variant {
-                            for element in elements {
-                                element_type = merge_values(&element_type, &element);
+                    variants
+                        .iter()
+                        .fold(AbstractValue::Undefined, |acc, variant| {
+                            if let AbstractValue::Array(elements) = variant {
+                                let elem_type = elements
+                                    .iter()
+                                    .fold(AbstractValue::Undefined, |e_acc, e| e_acc.merge(e));
+                                acc.merge(&elem_type)
+                            } else {
+                                acc.merge(&AbstractValue::Undefined)
                             }
-                        } else {
-                            // infer as undefined if not an array
-                            element_type =
-                                merge_values(&element_type, &AbstractValue::Undefined);
-                        }
-                    }
-                    element_type
+                        })
                 }
                 _ => AbstractValue::Undefined,
             };
@@ -175,67 +199,5 @@ fn abstract_equal(_left: &AbstractValue, _right: &AbstractValue) -> AbstractValu
 }
 
 pub fn merge_values(a: &AbstractValue, b: &AbstractValue) -> AbstractValue {
-    if a == b {
-        return a.clone();
-    }
-    if matches!(a, AbstractValue::Undefined) {
-        return b.clone();
-    }
-    if matches!(b, AbstractValue::Undefined) {
-        return a.clone();
-    }
-
-    match (a, b) {
-        // if both two values are Array, merge their each element
-        (AbstractValue::Array(a_elements), AbstractValue::Array(b_elements)) => {
-            let mut merged_elements = Vec::new();
-            let max_length = usize::max(a_elements.len(), b_elements.len());
-            for i in 0..max_length {
-                // take i-th element from each array, if not exist, take Undefined
-                let a_elem = a_elements.get(i).unwrap_or(&AbstractValue::Undefined);
-                let b_elem = b_elements.get(i).unwrap_or(&AbstractValue::Undefined);
-                let merged_elem = merge_values(a_elem, b_elem);
-                merged_elements.push(merged_elem);
-            }
-            AbstractValue::Array(merged_elements)
-        }
-        // if one of them is Array, merge their each element
-        (AbstractValue::Array(_), _) | (_, AbstractValue::Array(_)) => {
-            merge_variants(vec![a.clone(), b.clone()])
-        }
-        // if both are same type, return the type
-        _ => {
-            merge_variants(vec![a.clone(), b.clone()])
-        }
-    }
-}
-
-// merge all variants into one
-fn merge_variants(values: Vec<AbstractValue>) -> AbstractValue {
-    let mut variants = HashSet::new();
-
-    // recursively collect all variants to flaten the union
-    fn collect_variants(value: AbstractValue, set: &mut HashSet<AbstractValue>) {
-        match value {
-            // we collect inner variants when we meet union
-            AbstractValue::Union(values) => {
-                for v in values {
-                    collect_variants(v, set);
-                }
-            }
-            _ => {
-                set.insert(value);
-            }
-        }
-    }
-
-    for value in values {
-        collect_variants(value, &mut variants);
-    }
-
-    if variants.len() == 1 {
-        variants.into_iter().next().unwrap()
-    } else {
-        AbstractValue::Union(variants.into_iter().collect())
-    }
+    a.merge(b)
 }
