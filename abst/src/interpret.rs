@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{ast::ASTNode, types::Function, AbstractState, AbstractValue};
 
 // This module performs abstract interpretation of an AST (Abstract Syntax Tree).
@@ -91,9 +93,15 @@ pub fn interpret(node: &ASTNode, state: &mut AbstractState) -> AbstractValue {
             }
             result
         }
-        ASTNode::FunctionDeclaration { name, params, body } => {
+        ASTNode::FunctionDeclaration {
+            name,
+            params,
+            generics,
+            body,
+        } => {
             let function = Function {
                 params: params.clone(),
+                generics: generics.clone(),
                 body: *body.clone(),
             };
             state.functions.insert(name.clone(), function);
@@ -113,8 +121,23 @@ pub fn interpret(node: &ASTNode, state: &mut AbstractState) -> AbstractValue {
                         let arg_value = interpret(arg_node, state);
                         func_state.assign(param, arg_value);
                     }
-                    // interpret function body
-                    interpret(&func.body, &mut func_state)
+
+                    let mut generic_mapping = HashMap::new();
+                    for (i, generic) in func.generics.iter().enumerate() {
+                        if let Some(arg_node) = arguments.get(i) {
+                            let arg_value = interpret(arg_node, state);
+
+                            // mapping the generic to the argument's type
+                            generic_mapping.insert(generic.clone(), Box::new(arg_value));
+                        }
+                    }
+
+                    // when interpreting the function body, we replace the generic placeholders with the actual types
+                    // the `func_state` is now in a context with concrete types for all generics
+                    let result = interpret(&func.body, &mut func_state);
+
+                    // TODO: if needed connect the result with concrete generics
+                    result
                 } else {
                     AbstractValue::Undefined
                 }
@@ -200,4 +223,60 @@ fn abstract_equal(_left: &AbstractValue, _right: &AbstractValue) -> AbstractValu
 
 pub fn merge_values(a: &AbstractValue, b: &AbstractValue) -> AbstractValue {
     a.merge(b)
+}
+
+#[cfg(test)]
+mod interpreter_tests {
+    use super::*;
+    use crate::ast::ASTNode;
+    use crate::types::{AbstractState, AbstractValue};
+
+    #[test]
+    fn test_generic_function_call() {
+        let mut state = AbstractState::new();
+
+        // function identity<T>(x: T) { return x; }
+        let function_identity = ASTNode::FunctionDeclaration {
+            name: "identity".to_string(),
+            params: vec!["x".to_string()],
+            generics: vec!["T".to_string()],
+            body: Box::new(ASTNode::Variable("x".to_string())),
+        };
+
+        interpret(&function_identity, &mut state);
+
+        // y = identity(42);
+        let call_identity_number = ASTNode::Assignment {
+            target: "y".to_string(),
+            value: Box::new(ASTNode::FunctionCall {
+                function: Box::new(ASTNode::Variable("identity".to_string())),
+                arguments: vec![ASTNode::Literal(AbstractValue::Number)],
+            }),
+        };
+
+        interpret(&call_identity_number, &mut state);
+
+        assert_eq!(
+            state.get("y").cloned().unwrap(),
+            AbstractValue::Number,
+            "Expected y to be a Number"
+        );
+
+        // z = identity("hello");
+        let call_identity_string = ASTNode::Assignment {
+            target: "z".to_string(),
+            value: Box::new(ASTNode::FunctionCall {
+                function: Box::new(ASTNode::Variable("identity".to_string())),
+                arguments: vec![ASTNode::Literal(AbstractValue::String)],
+            }),
+        };
+
+        interpret(&call_identity_string, &mut state);
+
+        assert_eq!(
+            state.get("z").cloned().unwrap(),
+            AbstractValue::String,
+            "Expected z to be a String"
+        );
+    }
 }

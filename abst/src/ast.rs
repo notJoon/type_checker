@@ -28,6 +28,7 @@ pub enum ASTNode {
     FunctionDeclaration {
         name: String,
         params: Vec<String>,
+        generics: Vec<String>,
         body: Box<ASTNode>,
     },
     FunctionCall {

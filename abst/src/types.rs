@@ -16,6 +16,7 @@ pub enum AbstractValue {
     Object(AbstractObject),
     Array(Vec<AbstractValue>),
     Union(Vec<AbstractValue>),
+    Generic(String, Box<AbstractValue>), // String -> T, Box<AbstractValue> -> Concrete Type
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -26,6 +27,7 @@ pub struct AbstractObject {
 #[derive(Clone)]
 pub struct Function {
     pub params: Vec<String>,
+    pub generics: Vec<String>,
     pub body: ASTNode,
 }
 
