@@ -14,6 +14,7 @@ fn main() {
     let function_add = ASTNode::FunctionDeclaration {
         name: "add".to_string(),
         params: vec!["a".to_string(), "b".to_string()],
+        generics: vec![],
         body: Box::new(ASTNode::BinaryOp {
             op: "+".to_string(),
             left: Box::new(ASTNode::Variable("a".to_string())),

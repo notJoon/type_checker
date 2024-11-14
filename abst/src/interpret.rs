@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{ast::ASTNode, types::Function, AbstractState, AbstractValue};
 
 // This module performs abstract interpretation of an AST (Abstract Syntax Tree).
@@ -91,36 +93,104 @@ pub fn interpret(node: &ASTNode, state: &mut AbstractState) -> AbstractValue {
             }
             result
         }
-        ASTNode::FunctionDeclaration { name, params, body } => {
+        ASTNode::FunctionDeclaration {
+            name,
+            params,
+            generics,
+            body,
+        } => {
+            // when we encounter a function declaration, we construct a `Function` struct.
+            // the struct stores the function's params, optionally its generic types (along with any constrains), and its body.
+            //
+            // Then, insert this function into the current state, associating it with its identifier.
+            // This allows us to later retrieve and call this function during interpretation process.
+            //
+            // Example:
+            // ```
+            // function add<T: Number>(a: T, b: T) {
+            //     return a + b;
+            // }
+            // ```
+            //
+            // This function `add` takes two parameters `a` and `b` of generic type `T`
+            // constrained to be a `Number`.
             let function = Function {
                 params: params.clone(),
+                generics: generics.clone(),
                 body: *body.clone(),
             };
+            // store the function in the state to allow it to be invoked later
             state.functions.insert(name.clone(), function);
+            // return `Undefined` since defining a function
+            // does not produce a value immediately.
             AbstractValue::Undefined
         }
         ASTNode::FunctionCall {
             function,
             arguments,
         } => {
-            // we assume function is a variable name for simplicity
+            // When we encounter a function call, we assume that the `function` field contains
+            // the variable name of the function.
+            //
+            // Example:
+            // ```
+            // result = add(5, 10);
+            // ```
+            //
+            // Here, `add` is the variable name of the function.
             if let ASTNode::Variable(func_name) = &**function {
+                // look up the function by its name in the current state
                 if let Some(func) = state.functions.get(func_name).cloned() {
-                    // create new state
+                    // create new abstract state for interpreting this function call.
+                    // this represents the local state/context within the function body.
                     let mut func_state = AbstractState::new();
-                    // assign arguments to parameters
+
+                    // bind the provided arguments to the function's parameters.
                     for (param, arg_node) in func.params.iter().zip(arguments.iter()) {
                         let arg_value = interpret(arg_node, state);
                         func_state.assign(param, arg_value);
                     }
-                    // interpret function body
-                    interpret(&func.body, &mut func_state)
-                } else {
-                    AbstractValue::Undefined
+
+                    // create a mapping of generic type parameters to concrete values provided during the call.
+                    let mut generic_mapping = HashMap::new();
+                    for (i, (generic, constraint)) in func.generics.iter().enumerate() {
+                        // for each generic parameter, retrieve the corresponding argument if available.
+                        if let Some(arg_node) = arguments.get(i) {
+                            let arg_value = interpret(arg_node, state);
+
+                            // check constraint
+                            if let Some(constraint_type) = constraint {
+                                if !satisfies_constraint(&arg_value, &constraint_type) {
+                                    // if the argument does not satisfy the constraint, return undefined
+                                    return AbstractValue::Undefined;
+                                }
+                            }
+
+                            // mapping the generic to the argument's type when satisfied constraint
+                            generic_mapping.insert(generic.clone(), Box::new(arg_value));
+                        }
+                    }
+
+                    // re-assign parameters with their arguments within the new function state for evaluation
+                    for (param, arg_node) in func.params.iter().zip(arguments.iter()) {
+                        let arg_value = interpret(arg_node, state);
+                        func_state.assign(param, arg_value);
+                    }
+
+                    // Interpret the function body using the newly created function state.
+                    // During this step, any references to generics should be replaced with their concrete types.
+                    // This ensures that the function body operates with the correct types.
+                    let result = interpret(&func.body, &mut func_state);
+
+                    // return the result of interpreting the function body.
+                    //
+                    // TODO: if needed connect the result with concrete generics
+                    return result;
                 }
-            } else {
-                AbstractValue::Undefined
+                // not found in state
+                return AbstractValue::Undefined;
             }
+            AbstractValue::Undefined
         }
         ASTNode::ArrayLiteral(elements) => {
             let avv = elements.iter().map(|elem| interpret(elem, state)).collect();
@@ -149,10 +219,9 @@ pub fn interpret(node: &ASTNode, state: &mut AbstractState) -> AbstractValue {
                                 let elem_type = elements
                                     .iter()
                                     .fold(AbstractValue::Undefined, |e_acc, e| e_acc.merge(e));
-                                acc.merge(&elem_type)
-                            } else {
-                                acc.merge(&AbstractValue::Undefined)
+                                return acc.merge(&elem_type);
                             }
+                            acc.merge(&AbstractValue::Undefined)
                         })
                 }
                 _ => AbstractValue::Undefined,
@@ -200,4 +269,130 @@ fn abstract_equal(_left: &AbstractValue, _right: &AbstractValue) -> AbstractValu
 
 pub fn merge_values(a: &AbstractValue, b: &AbstractValue) -> AbstractValue {
     a.merge(b)
+}
+
+// check if the value satisfies the constraint
+fn satisfies_constraint(v: &AbstractValue, constraint: &str) -> bool {
+    match constraint {
+        "Number" => matches!(v, AbstractValue::Number),
+        "String" => matches!(v, AbstractValue::String),
+        "Boolean" => matches!(v, AbstractValue::Boolean),
+        // TODO: add more constraints
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod interpreter_tests {
+    use super::*;
+    use crate::ast::ASTNode;
+    use crate::types::{AbstractState, AbstractValue};
+
+    #[test]
+    fn test_generic_function_call() {
+        let mut state = AbstractState::new();
+
+        // function identity<T>(x: T) { return x; }
+        let function_identity = ASTNode::FunctionDeclaration {
+            name: "identity".to_string(),
+            params: vec!["x".to_string()],
+            generics: vec![("T".to_string(), None)],
+            body: Box::new(ASTNode::Variable("x".to_string())),
+        };
+
+        interpret(&function_identity, &mut state);
+
+        // y = identity(42);
+        let call_identity_number = ASTNode::Assignment {
+            target: "y".to_string(),
+            value: Box::new(ASTNode::FunctionCall {
+                function: Box::new(ASTNode::Variable("identity".to_string())),
+                arguments: vec![ASTNode::Literal(AbstractValue::Number)],
+            }),
+        };
+
+        interpret(&call_identity_number, &mut state);
+
+        assert_eq!(
+            state.get("y").cloned().unwrap(),
+            AbstractValue::Number,
+            "Expected y to be a Number"
+        );
+
+        // z = identity("hello");
+        let call_identity_string = ASTNode::Assignment {
+            target: "z".to_string(),
+            value: Box::new(ASTNode::FunctionCall {
+                function: Box::new(ASTNode::Variable("identity".to_string())),
+                arguments: vec![ASTNode::Literal(AbstractValue::String)],
+            }),
+        };
+
+        interpret(&call_identity_string, &mut state);
+
+        assert_eq!(
+            state.get("z").cloned().unwrap(),
+            AbstractValue::String,
+            "Expected z to be a String"
+        );
+    }
+
+    #[test]
+    fn test_bounded_generic_function_call() {
+        let mut state = AbstractState::new();
+
+        // function add<T: Number>(a: T, b: T) { return a + b; }
+        let function_add = ASTNode::FunctionDeclaration {
+            name: "add".to_string(),
+            params: vec!["a".to_string(), "b".to_string()],
+            generics: vec![("T".to_string(), Some("Number".to_string()))], // generic with constraint
+            body: Box::new(ASTNode::BinaryOp {
+                op: "+".to_string(),
+                left: Box::new(ASTNode::Variable("a".to_string())),
+                right: Box::new(ASTNode::Variable("b".to_string())),
+            }),
+        };
+
+        interpret(&function_add, &mut state);
+
+        // result = add(5, 10);
+        let call_add_correct = ASTNode::Assignment {
+            target: "result".to_string(),
+            value: Box::new(ASTNode::FunctionCall {
+                function: Box::new(ASTNode::Variable("add".to_string())),
+                arguments: vec![
+                    ASTNode::Literal(AbstractValue::Number),
+                    ASTNode::Literal(AbstractValue::Number),
+                ],
+            }),
+        };
+
+        interpret(&call_add_correct, &mut state);
+
+        assert_eq!(
+            state.get("result").cloned().unwrap(),
+            AbstractValue::Number,
+            "Expected result to be a Number"
+        );
+
+        // invalid_result = add("hello", 10);
+        let call_add_invalid = ASTNode::Assignment {
+            target: "invalid_result".to_string(),
+            value: Box::new(ASTNode::FunctionCall {
+                function: Box::new(ASTNode::Variable("add".to_string())),
+                arguments: vec![
+                    ASTNode::Literal(AbstractValue::String),
+                    ASTNode::Literal(AbstractValue::Number),
+                ],
+            }),
+        };
+
+        interpret(&call_add_invalid, &mut state);
+
+        assert_eq!(
+            state.get("invalid_result").cloned().unwrap(),
+            AbstractValue::Undefined,
+            "Expected invalid_result to be Undefined due to type mismatch"
+        );
+    }
 }
