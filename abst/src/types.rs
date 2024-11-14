@@ -27,7 +27,7 @@ pub struct AbstractObject {
 #[derive(Clone)]
 pub struct Function {
     pub params: Vec<String>,
-    pub generics: Vec<String>,
+    pub generics: Vec<(String, Option<String>)>,
     pub body: ASTNode,
 }
 
