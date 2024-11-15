@@ -180,7 +180,8 @@ pub fn interpret(node: &ASTNode, state: &mut AbstractState) -> AbstractValue {
                     // Interpret the function body using the newly created function state.
                     // During this step, any references to generics should be replaced with their concrete types.
                     // This ensures that the function body operates with the correct types.
-                    let result = interpret(&func.body, &mut func_state);
+                    let result =
+                        interpret_with_generics(&func.body, &mut func_state, &generic_mapping);
 
                     // return the result of interpreting the function body.
                     //
@@ -271,6 +272,50 @@ pub fn merge_values(a: &AbstractValue, b: &AbstractValue) -> AbstractValue {
     a.merge(b)
 }
 
+fn interpret_with_generics(
+    node: &ASTNode,
+    state: &mut AbstractState,
+    mapping: &HashMap<String, Box<AbstractValue>>,
+) -> AbstractValue {
+    match node {
+        ASTNode::IfStatement {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            // If statement handling to narrow the type based on conditions.
+            // For example, if (x == 42), we can narrow x to Number.
+            let mut then_state = state.clone();
+            let mut else_state = state.clone();
+
+            // Interpret the then-branch in a potentially narrowed context
+            let then_value = interpret_with_generics(then_branch, &mut then_state, mapping);
+
+            // Interpret the else-branch if present
+            let else_value = if let Some(else_branch) = else_branch {
+                interpret_with_generics(else_branch, &mut else_state, mapping)
+            } else {
+                AbstractValue::Undefined
+            };
+
+            // Merge states and return the appropriate value
+            state.merge(&then_state);
+            state.merge(&else_state);
+            then_value.merge(&else_value)
+        }
+
+        ASTNode::Variable(name) => {
+            // Check if the variable is a generic and retrieve its concrete value
+            if let Some(value) = mapping.get(name) {
+                return *value.clone();
+            }
+            state.get(name).cloned().unwrap_or(AbstractValue::Undefined)
+        }
+
+        _ => interpret(node, state), // default handling
+    }
+}
+
 // check if the value satisfies the constraint
 fn satisfies_constraint(v: &AbstractValue, constraint: &str) -> bool {
     match constraint {
@@ -287,6 +332,61 @@ mod interpreter_tests {
     use super::*;
     use crate::ast::ASTNode;
     use crate::types::{AbstractState, AbstractValue};
+
+    #[test]
+    fn test_interpret_with_generics_if_statement() {
+        let mut state = AbstractState::new();
+
+        // T -> Number
+        let mut generic_mapping = HashMap::new();
+        generic_mapping.insert("T".to_string(), Box::new(AbstractValue::Number));
+
+        // if (x == 42) { return "number"; } else { return "other"; }
+        let condition = ASTNode::BinaryOp {
+            op: "==".to_string(),
+            left: Box::new(ASTNode::Variable("x".to_string())),
+            right: Box::new(ASTNode::Literal(AbstractValue::Number)),
+        };
+        let then_branch = ASTNode::Literal(AbstractValue::String); // "number"
+        let else_branch = Some(Box::new(ASTNode::Literal(AbstractValue::String))); // "other"
+
+        let if_statement = ASTNode::IfStatement {
+            condition: Box::new(condition),
+            then_branch: Box::new(then_branch),
+            else_branch,
+        };
+
+        // add variable x to state
+        state.assign("x", AbstractValue::Number);
+
+        let result = interpret_with_generics(&if_statement, &mut state, &generic_mapping);
+
+        // condition is true, then-branch is selected which infer to String
+        assert_eq!(
+            result,
+            AbstractValue::String,
+            "Expected the result to be 'number' as String"
+        );
+    }
+
+    #[test]
+    fn test_interpret_with_generics_variable_resolution() {
+        let mut state = AbstractState::new();
+
+        // T -> Number
+        let mut generic_mapping = HashMap::new();
+        generic_mapping.insert("T".to_string(), Box::new(AbstractValue::Number));
+
+        // x = T
+        let variable_node = ASTNode::Variable("T".to_string());
+        let result = interpret_with_generics(&variable_node, &mut state, &generic_mapping);
+
+        assert_eq!(
+            result,
+            AbstractValue::Number,
+            "Expected the variable 'T' to be resolved to Number"
+        );
+    }
 
     #[test]
     fn test_generic_function_call() {
@@ -393,6 +493,64 @@ mod interpreter_tests {
             state.get("invalid_result").cloned().unwrap(),
             AbstractValue::Undefined,
             "Expected invalid_result to be Undefined due to type mismatch"
+        );
+    }
+
+    #[test]
+    fn test_polymorphic_function_with_type_inference() {
+        let mut state = AbstractState::new();
+
+        // function determine_type<T>(x: T) { if (x == 42) { return "number"; } else { return "other"; } }
+        let function_determine_type = ASTNode::FunctionDeclaration {
+            name: "determine_type".to_string(),
+            params: vec!["x".to_string()],
+            generics: vec![("T".to_string(), None)], // no constraint
+            body: Box::new(ASTNode::IfStatement {
+                condition: Box::new(ASTNode::BinaryOp {
+                    op: "==".to_string(),
+                    left: Box::new(ASTNode::Variable("x".to_string())),
+                    right: Box::new(ASTNode::Literal(AbstractValue::Number)),
+                }),
+                then_branch: Box::new(ASTNode::Literal(AbstractValue::String)), // "number"
+                else_branch: Some(Box::new(ASTNode::Literal(AbstractValue::String))), // "other"
+            }),
+        };
+
+        // add function definition to state
+        interpret(&function_determine_type, &mut state);
+
+        // call determine_type with an integer: result1 = determine_type(42);
+        let call_determine_number = ASTNode::Assignment {
+            target: "result1".to_string(),
+            value: Box::new(ASTNode::FunctionCall {
+                function: Box::new(ASTNode::Variable("determine_type".to_string())),
+                arguments: vec![ASTNode::Literal(AbstractValue::Number)],
+            }),
+        };
+
+        interpret(&call_determine_number, &mut state);
+
+        assert_eq!(
+            state.get("result1").cloned().unwrap(),
+            AbstractValue::String,
+            "Expected result1 to be 'number' as String"
+        );
+
+        // call determine_type with a string: result2 = determine_type("hello");
+        let call_determine_string = ASTNode::Assignment {
+            target: "result2".to_string(),
+            value: Box::new(ASTNode::FunctionCall {
+                function: Box::new(ASTNode::Variable("determine_type".to_string())),
+                arguments: vec![ASTNode::Literal(AbstractValue::String)],
+            }),
+        };
+
+        interpret(&call_determine_string, &mut state);
+
+        assert_eq!(
+            state.get("result2").cloned().unwrap(),
+            AbstractValue::String,
+            "Expected result2 to be 'other' as String"
         );
     }
 }
